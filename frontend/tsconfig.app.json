@@ -1,0 +1,39 @@
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
+    "target": "es2023",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "esnext",
+    "types": [
+      "vite/client",
+      // LEARNING: "vitest/globals" tells TypeScript about the globally injected
+      // test helpers (describe, it, expect, etc.) that Vitest injects when
+      // globals:true is set in vite.config.ts. Without this entry the compiler
+      // would complain that those names are undeclared.
+      "vitest/globals"
+    ],
+    "skipLibCheck": true,
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    /* Strict type checking — all must stay enabled */
+    // LEARNING: "strict": true is a shorthand that enables a suite of checks:
+    // strictNullChecks, strictFunctionTypes, strictPropertyInitialization, etc.
+    // We layer additional rules on top to catch index-access bugs and override
+    // mistakes that "strict" alone doesn't cover.
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "erasableSyntaxOnly": true
+  },
+  "include": ["src"]
+}
