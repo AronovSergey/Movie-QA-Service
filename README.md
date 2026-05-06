@@ -199,16 +199,6 @@ docker compose ps
 
 ---
 
-## Architecture Decision Records
-
-Significant decisions are documented in [`docs/adr/`](./docs/adr/). Read these to understand *why* the system is shaped the way it is, not just *what* it does.
-
-| ADR | Decision |
-|---|---|
-| [0001](./docs/adr/0001-nginx-as-api-gateway.md) | Nginx as API gateway over Spring Cloud Gateway |
-
----
-
 ## Implementation phases
 
 See [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md) for the full phased plan.
