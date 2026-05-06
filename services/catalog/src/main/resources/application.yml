@@ -1,0 +1,43 @@
+spring:
+  application:
+    name: catalog
+
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/movieqa}
+    username: ${SPRING_DATASOURCE_USERNAME:movieqa}
+    password: ${SPRING_DATASOURCE_PASSWORD:movieqa_dev_secret}
+    hikari:
+      maximum-pool-size: 5
+      minimum-idle: 2
+      connection-timeout: 20000
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        default_schema: catalog
+    show-sql: false
+
+  flyway:
+    schemas: catalog
+    locations: classpath:db/migration
+    baseline-on-migrate: false
+
+server:
+  port: 8083
+  forward-headers-strategy: framework
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: when-authorized
+
+logging:
+  level:
+    root: INFO
+    com.movieqa: DEBUG

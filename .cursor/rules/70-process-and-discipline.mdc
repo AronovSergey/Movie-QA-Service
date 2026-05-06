@@ -71,7 +71,7 @@ You don't have to write all of these on day one, but as you build, write ADRs fo
 - Embedding model and the implications for re-indexing
 - Auth strategy (JWT structure, refresh token storage)
 - Streaming protocol (SSE vs WebSocket)
-- API gateway choice
+- Reverse proxy / entry point choice (Nginx vs alternatives — see ADR-0003)
 - CI provider and pipeline shape
 - Local-only vs deployed dev environment
 

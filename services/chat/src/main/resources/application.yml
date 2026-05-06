@@ -1,0 +1,50 @@
+spring:
+  application:
+    name: chat
+
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/movieqa}
+    username: ${SPRING_DATASOURCE_USERNAME:movieqa}
+    password: ${SPRING_DATASOURCE_PASSWORD:movieqa_dev_secret}
+    hikari:
+      maximum-pool-size: 5
+      minimum-idle: 2
+      connection-timeout: 20000
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        default_schema: chat
+    show-sql: false
+
+  flyway:
+    schemas: chat
+    locations: classpath:db/migration
+    baseline-on-migrate: false
+
+server:
+  port: 8082
+  forward-headers-strategy: framework
+
+# RAG service connection — used by the WebClient in Phase 3.
+# Defined here so it's visible in config, not buried in Java code.
+rag:
+  service:
+    url: ${RAG_SERVICE_URL:http://localhost:8000}
+    timeout-seconds: 120  # LLM calls can be slow
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: when-authorized
+
+logging:
+  level:
+    root: INFO
+    com.movieqa: DEBUG

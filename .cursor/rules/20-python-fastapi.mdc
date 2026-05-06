@@ -2,7 +2,8 @@
 description: "Python service conventions (FastAPI for RAG, workers for ingestion)"
 globs:
   - "services/rag/**"
-  - "services/ingestion/**"
+  - "services/collector/**"
+  - "services/indexer/**"
   - "**/*.py"
   - "**/pyproject.toml"
 ---
@@ -11,7 +12,8 @@ globs:
 
 ## Stack
 
-- **Python 3.12** (use modern type hints: `list[str]`, `dict[str, int]`, `X | None`, no `Optional[X]`)
+- **Python 3.12** (see ADR-0002 for version rationale). Floor: 3.10, required for the modern type-hint syntax used throughout the rules.
+- **Modern type hints required:** `list[str]`, `dict[str, int]`, `X | None`. Never `Optional[X]`, never `List[str]`, never `Union[...]`. These work in 3.10+, are the standard idiom from 3.11 onward, and read like the type hints in TypeScript/Java/Kotlin/Rust.
 - **`uv`** as the package manager (`uv add`, `uv run`, `uv sync`). Not pip, not poetry, not pdm.
 - **FastAPI** for HTTP services (RAG service)
 - **Pydantic v2** for all data validation and schemas
@@ -117,7 +119,7 @@ class AnswerResponse(BaseModel):
     latency_ms: int
 ```
 
-## Ingestion worker specifics
+## Collector and Indexer specifics
 
 - **Idempotency is mandatory.** Every operation must be safe to retry.
   - Postgres: `INSERT ... ON CONFLICT (tmdb_id) DO UPDATE SET ...`

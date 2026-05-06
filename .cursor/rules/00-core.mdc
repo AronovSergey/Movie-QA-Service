@@ -21,11 +21,13 @@ This project has two simultaneous goals that you must honor in every response:
 
 The system is divided into three planes (see `docs/architecture.svg` and `README.md`):
 
-- **Request plane** (user-facing, sync): React → API Gateway → Auth | Chat | Catalog → RAG service
-- **Ingestion plane** (background, async): Scheduler → RabbitMQ → Ingestion workers → External APIs
+- **Request plane** (user-facing, sync): React → Nginx (reverse proxy) → Auth | Chat | Catalog → RAG service
+- **Integration plane** (background, async): Scheduler → RabbitMQ → Collector → RabbitMQ → Indexer → External APIs + data plane
 - **Shared data plane**: Postgres (schemas per service), Qdrant (vector DB), Redis (cache + sessions)
 
-The two planes never share request handling. They share data only. **Never put background work in the request path. Never expose ingestion endpoints publicly.**
+The two planes never share request handling. They share data only. **Never put background work in the request path. Never expose integration endpoints publicly.**
+
+Each Spring Boot service handles its own JWT validation via Spring Security with shared config. There is no dedicated API gateway service — Nginx is the entry point and routing layer (see ADR-0003).
 
 ## Repository layout
 
@@ -42,10 +44,14 @@ The two planes never share request handling. They share data only. **Never put b
 │   ├── chat/                       # Spring Boot — conversations
 │   ├── catalog/                    # Spring Boot — movies/people read API
 │   ├── scheduler/                  # Spring Boot — cron + admin trigger
-│   ├── gateway/                    # Spring Cloud Gateway
 │   ├── rag/                        # FastAPI — retrieval + LLM
-│   └── ingestion/                  # Python — RabbitMQ workers
-├── infra/                          # Prometheus, Grafana, Langfuse configs
+│   ├── collector/                  # Python — steps 1-3 (fetch, enrich, normalize)
+│   └── indexer/                    # Python — steps 4-7 (chunk, embed, upsert)
+├── infra/
+│   ├── nginx/                      # nginx.conf, route maps, TLS config
+│   ├── prometheus/
+│   ├── grafana/
+│   └── langfuse/
 └── eval/                           # RAG evaluation suite
 ```
 
@@ -57,7 +63,7 @@ The two planes never share request handling. They share data only. **Never put b
 - **Never commit secrets.** Use `.env` files (gitignored) and document the required keys in `.env.example`.
 - **Never write production code without tests.** A function without tests is incomplete. The test does not have to be exhaustive, but it must exist.
 - **Never skip error handling.** Every external call (DB, HTTP, broker, LLM) must handle failure. Either propagate with context or recover with a documented strategy.
-- **Never make non-idempotent operations.** Especially in the ingestion plane: every worker action must be safe to retry. Use upserts with deterministic keys.
+- **Never make non-idempotent operations.** Especially in the integration plane: every worker action must be safe to retry. Use upserts with deterministic keys.
 - **Never put `console.log` / `print()` debug statements in committed code.** Use the project's logger.
 - **Never use blocking I/O in async functions.** In FastAPI, use `httpx.AsyncClient`, `asyncpg`, etc. — not `requests` or sync DB calls.
 - **Never hard-code URLs, ports, or magic numbers.** Use config (env vars, `application.yml`, settings).
@@ -78,7 +84,7 @@ Comments lean toward "more than usual" because of the learning mandate, but shou
 
 - **YES**: explain non-obvious *why* (`# LEARNING: We embed the question with the same model used at ingestion — different models live in different vector spaces and aren't comparable`)
 - **YES**: warn about pitfalls (`// WARNING: Do not change the chunk_id format — it must remain deterministic for idempotent upserts`)
-- **YES**: link to ADRs (`# See docs/adr/0003-rabbitmq-over-kafka.md`)
+- **YES**: link to ADRs (`# See docs/adr/0004-split-integration-pipeline.md`)
 - **NO**: restating what the code does (`// increment counter` above `counter++`)
 - **NO**: TODOs without an issue link (use `// TODO(#42): ...` referencing a real GitHub issue)
 
@@ -91,6 +97,19 @@ Comments lean toward "more than usual" because of the learning mandate, but shou
 - **Python**: snake_case everywhere except classes (PascalCase) and constants (UPPER_SNAKE_CASE)
 - **TypeScript**: camelCase variables/functions, PascalCase types/components, UPPER_SNAKE_CASE constants
 - **Topics/queues**: dot-separated, past-tense for events, present-tense for commands (`ingest.requested`, `movie.indexed`, `answer.ready`)
+
+## Nginx (entry point) conventions
+
+Nginx is the single entry point in front of all services. Config lives in `infra/nginx/nginx.conf` (see ADR-0003 for the rationale).
+
+- **All API paths are prefixed with `/api/`** and routed to the corresponding service (`/api/auth/*` → auth, `/api/chat/*` → chat, etc.). The frontend never calls services directly.
+- **Set `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Real-IP`** on every `proxy_pass`. Spring Boot is configured to trust them via `server.forward-headers-strategy=framework`.
+- **Enable gzip on text content types** (`text/plain`, `application/json`, `text/css`, `application/javascript`, `image/svg+xml`).
+- **CORS lives at Nginx, not at services.** Same-origin via the `/api/` prefix means CORS is rarely an issue, but when it is, it's solved in one place.
+- **Per-IP rate limits** via `limit_req` zones — reasonable defaults (e.g., 10 req/sec with burst 20) per route. Per-user limits, if needed, go in services.
+- **Health endpoint** at `/health` proxied to a backend health-check or implemented locally with `return 200`.
+- **Dev vs prod profiles:** dev `nginx.conf` proxies `/` to the Vite dev server; prod serves the built React bundle as static files from `/usr/share/nginx/html`. Don't mix these.
+- **TLS in production** via Let's Encrypt + certbot. In local dev, plain HTTP is fine.
 
 ## When in doubt
 

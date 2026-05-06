@@ -1,0 +1,53 @@
+spring:
+  application:
+    name: scheduler
+
+  rabbitmq:
+    host: ${SPRING_RABBITMQ_HOST:localhost}
+    port: ${SPRING_RABBITMQ_PORT:5672}
+    username: ${SPRING_RABBITMQ_USERNAME:movieqa}
+    password: ${SPRING_RABBITMQ_PASSWORD:rabbitmq_dev_secret}
+    # Publisher confirms ensure the message was accepted by the broker
+    # before we consider the publish successful.
+    publisher-confirm-type: correlated
+    publisher-returns: true
+
+  # Quartz job scheduler — uses an in-memory store for Phase 0.
+  # LEARNING: In Phase 7 we'll switch to JdbcJobStore so scheduled jobs
+  # survive restarts. For now, in-memory is simpler and sufficient.
+  quartz:
+    job-store-type: memory
+    properties:
+      org:
+        quartz:
+          threadPool:
+            threadCount: 2  # small pool — scheduler has few jobs
+
+server:
+  port: 8084
+  forward-headers-strategy: framework
+
+# Ingestion topic name — centralised here so it's not a magic string in code.
+# See ADR-0003 (RabbitMQ topic naming) when written.
+ingestion:
+  rabbitmq:
+    exchange: movieqa.events
+    routing-key: ingest.requested
+
+# Admin endpoint protection — token injected via env in all environments.
+admin:
+  token: ${ADMIN_API_TOKEN:dev_admin_token}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: when-authorized
+
+logging:
+  level:
+    root: INFO
+    com.movieqa: DEBUG

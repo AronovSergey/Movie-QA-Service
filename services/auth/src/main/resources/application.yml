@@ -1,0 +1,67 @@
+spring:
+  application:
+    name: auth
+
+  datasource:
+    # LEARNING: Spring Boot reads ${ENV_VAR} placeholders from environment
+    # variables at startup. The :default syntax provides a fallback for local
+    # development without a .env file loaded. In production, always set the
+    # real value — never rely on a default for secrets.
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/movieqa}
+    username: ${SPRING_DATASOURCE_USERNAME:movieqa}
+    password: ${SPRING_DATASOURCE_PASSWORD:movieqa_dev_secret}
+    hikari:
+      # Connection pool sizing. For a learning project on a laptop, 5 is plenty.
+      # Rule of thumb: pool_size = (CPU cores * 2) + effective_spindle_count
+      maximum-pool-size: 5
+      minimum-idle: 2
+      connection-timeout: 20000  # 20s — fail fast if DB is unreachable
+
+  jpa:
+    # NEVER use ddl-auto=create or update in a service with Flyway.
+    # Flyway owns the schema; Hibernate should only validate it matches the
+    # entities. This catches entity/migration drift at startup, not at runtime.
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        # Routes all JPA queries to the `auth` schema by default so entity
+        # annotations don't need @Table(schema = "auth") on every class.
+        default_schema: auth
+        format_sql: false
+    show-sql: false  # set to true locally when debugging query issues
+
+  flyway:
+    schemas: auth
+    locations: classpath:db/migration
+    # baseline-on-migrate: true is useful when adopting Flyway on an existing
+    # database. Leave false for a greenfield project.
+    baseline-on-migrate: false
+
+  # Spring Security generates a random password on startup if not configured.
+  # We override here to suppress the startup log noise.
+  # Real security config comes in Phase 5.
+  security:
+    user:
+      name: dev
+      password: ${SPRING_SECURITY_PASSWORD:dev}
+
+server:
+  port: 8081
+  # Forward headers from Nginx (X-Forwarded-For, X-Forwarded-Proto).
+  # Required for correct URL generation in responses when behind a proxy.
+  forward-headers-strategy: framework
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: when-authorized
+
+logging:
+  level:
+    root: INFO
+    com.movieqa: DEBUG

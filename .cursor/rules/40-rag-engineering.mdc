@@ -2,7 +2,8 @@
 description: "RAG-specific conventions: retrieval, embeddings, prompts, evaluation"
 globs:
   - "services/rag/**"
-  - "services/ingestion/**"
+  - "services/collector/**"
+  - "services/indexer/**"
   - "eval/**"
 ---
 

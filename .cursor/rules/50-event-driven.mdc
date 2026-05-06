@@ -2,7 +2,8 @@
 description: "Event-driven plane: RabbitMQ messaging, idempotency, scheduled jobs"
 globs:
   - "services/scheduler/**"
-  - "services/ingestion/**"
+  - "services/collector/**"
+  - "services/indexer/**"
   - "services/rag/**"
   - "**/messaging/**"
   - "**/events/**"
@@ -14,16 +15,39 @@ These rules govern asynchronous communication between services via RabbitMQ. Any
 
 ## The two-plane discipline
 
-This project deliberately separates the **request plane** (sync, user-facing) from the **ingestion plane** (async, background). Cross-plane communication happens through the data plane (Postgres, Qdrant) and through events on the broker.
+This project deliberately separates the **request plane** (sync, user-facing) from the **integration plane** (async, background). Cross-plane communication happens through the data plane (Postgres, Qdrant) and through events on the broker.
 
 **Rules that flow from this:**
 
 - The ingestion service must NEVER expose public HTTP endpoints. It is a worker, not a service.
 - The scheduler must NEVER do business logic. It only publishes events.
-- The chat/auth/catalog services must NEVER consume from the ingestion plane's queues.
-- The ingestion workers must NEVER write to user-owned tables (users, conversations, messages).
+- The chat/auth/catalog services must NEVER consume from the integration plane's queues.
+- The Collector and Indexer must NEVER write to user-owned tables (users, conversations, messages).
 
-When in doubt: would a failure here block a user request? If yes, it belongs in the request plane. If no, it belongs in the ingestion plane.
+When in doubt: would a failure here block a user request? If yes, it belongs in the request plane. If no, it belongs in the integration plane.
+
+## Ingestion pipeline structure
+
+The ingestion pipeline does seven steps per movie: fetch (TMDB), enrich (Wikipedia), normalize, chunk, embed, upsert to Postgres, upsert to Qdrant.
+
+**Design:** the pipeline is split into two services connected by RabbitMQ. The split lives along the natural seam between "produce normalized data" and "make it searchable":
+
+- **Collector** (`services/collector/`) — runs steps 1-3 (fetch + enrich + normalize). Consumes `ingest.requested`, publishes `movie.normalized` with the full normalized payload.
+- **Indexer** (`services/indexer/`) — runs steps 4-7 (chunk + embed + upsert to both stores). Consumes `movie.normalized`, publishes `movie.indexed`.
+
+**Why split:**
+
+- The two halves have orthogonal scaling needs. Collector is bottlenecked by external rate limits (TMDB ~40 req/10s). Indexer is bottlenecked by embedding API throughput. Splitting lets each scale independently without one dragging down the other.
+- Failure isolation: TMDB outage doesn't stop the Indexer from draining queued work. Embedding API outage doesn't stop the Collector from queueing more.
+- New downstream consumers of `movie.normalized` (analytics, search, notifications) attach without touching the Collector.
+
+**Rules that follow:**
+
+- **`NormalizedMovie` is the wire format between Collector and Indexer.** Pydantic model with `schema_version: int = 1`. Versioned from day one — schema changes increment the version and require coordinated deployment.
+- **Collector must NOT import chunking, embedding, or vector DB clients.** Its dependencies are TMDB, Wikipedia, and the `NormalizedMovie` schema.
+- **Indexer must NOT import TMDB or Wikipedia clients.** Its dependencies are the `NormalizedMovie` schema, the chunker, the embedder, and Postgres/Qdrant clients.
+- **Both services are idempotent consumers.** Re-processing the same message produces identical state. See the idempotency section below.
+- **The Collector → RabbitMQ → Indexer chain has its own DLQs** at each hop. A bad message in `ingest.requested` lands in `ingest.requested.dlq`; a bad message in `movie.normalized` lands in `movie.normalized.dlq`.
 
 ## Topic and queue naming
 
@@ -31,7 +55,7 @@ Use dot-separated, lowercase names:
 
 | Pattern | Use for | Examples |
 |---|---|---|
-| `<noun>.<past-tense-verb>` | Domain events (something happened) | `movie.indexed`, `answer.ready`, `question.asked` |
+| `<noun>.<past-tense-verb>` | Domain events (something happened) | `movie.normalized`, `movie.indexed`, `answer.ready`, `question.asked` |
 | `<noun>.<imperative-verb>` | Commands (please do X) | `ingest.requested`, `embed.requested` |
 | `*.dlq` | Dead-letter queues | `ingest.requested.dlq` |
 | `*.retry` | Retry queues with delay | `ingest.requested.retry` |

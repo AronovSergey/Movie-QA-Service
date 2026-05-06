@@ -5,7 +5,6 @@ globs:
   - "services/chat/**"
   - "services/catalog/**"
   - "services/scheduler/**"
-  - "services/gateway/**"
   - "**/*.java"
   - "**/pom.xml"
   - "**/build.gradle"
@@ -101,12 +100,15 @@ config/       — @Configuration classes
 - **Don't use `@Transactional` on private methods.** Spring's proxy-based AOP won't apply.
 - **Don't catch and rethrow without context.** If you wrap, include the original cause and add information.
 
-## Spring Cloud Gateway specifics (gateway service only)
+## Cross-service JWT authentication (no gateway service)
 
-- **JWT validation as a global filter** before routing.
-- **Inject user context as headers** (`X-User-Id`, `X-User-Roles`) for downstream services.
-- **CORS configured at the gateway only**, not in individual services.
-- **Rate limiting via Redis-backed `RequestRateLimiter`** filter.
+There is no dedicated API gateway service — Nginx is the entry point and routing layer (see ADR-0003). Each Spring Boot service handles its own JWT validation.
+
+- **Extract a shared `auth-common` module** (Maven module / Gradle subproject) containing the JWT validation filter, security config, and exception handling. Each service depends on it. This is how you avoid copy-paste of auth code without introducing a runtime gateway service.
+- **JWT validation is a Spring Security filter chain** in each service. The `auth` service issues tokens; every other service validates them with the same shared secret or public key.
+- **CORS is configured at Nginx**, not in each service. Services trust that requests reaching them have already passed Nginx.
+- **Rate limiting:** light per-route limits at Nginx (`limit_req`) for blunt protection. Per-user limits, if needed later, go in a Spring filter using Bucket4j with Redis backing.
+- **The `X-Forwarded-*` and `X-Real-IP` headers from Nginx must be trusted.** Configure `server.forward-headers-strategy=framework` in `application.yml` so Spring uses them for client IP detection.
 
 ## Scheduler service specifics
 
