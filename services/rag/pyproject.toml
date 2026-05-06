@@ -1,0 +1,76 @@
+# pyproject.toml — RAG service
+#
+# Managed by uv (https://docs.astral.sh/uv/).
+# To add a dependency: uv add <package>
+# To run tests:        uv run pytest
+# To start locally:    uv run uvicorn rag.main:app --reload --port 8000
+#
+# LEARNING: We use a src/ layout (src/rag/) rather than a flat layout.
+# This forces the package to be installed before it can be imported, which
+# catches packaging bugs early. uv handles this automatically via editable
+# installs (`uv sync` creates a .venv with the package installed as editable).
+
+[project]
+name = "rag"
+version = "0.1.0"
+description = "RAG service — retrieval-augmented generation for Movie QA"
+requires-python = ">=3.12"
+dependencies = [
+    # FastAPI with the "standard" extras pulls in uvicorn[standard], which
+    # includes httptools and uvloop for production-grade async performance.
+    "fastapi[standard]>=0.115.0",
+    # Pydantic Settings reads config from environment variables with full
+    # type validation. Required vars raise at startup if missing.
+    "pydantic-settings>=2.7.0",
+]
+
+# ── Dev dependencies (PEP 735 dependency groups) ──────────────────────────────
+# LEARNING: uv supports PEP 735 "dependency groups" as a standard way to
+# declare dev-only dependencies. Use `uv sync --dev` to install them.
+# This is preferred over [project.optional-dependencies] for dev tooling
+# because it doesn't pollute the package's public extras.
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+    # pytest-asyncio lets us write `async def test_*` functions without
+    # manually managing the event loop. We set asyncio_mode = "auto" below
+    # so every async test function is automatically wrapped.
+    "pytest-asyncio>=0.24.0",
+    # httpx is needed to drive FastAPI's async test client (ASGI transport).
+    # It is also used at runtime for outbound HTTP calls (LLM, Qdrant).
+    "httpx>=0.27.0",
+    "ruff>=0.9.0",
+]
+
+# ── Build system ──────────────────────────────────────────────────────────────
+# hatchling is uv's recommended build backend. It respects the src/ layout
+# automatically when told which packages to include.
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rag"]
+
+# ── pytest ────────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+# ── ruff (linter + formatter) ─────────────────────────────────────────────────
+# LEARNING: ruff replaces flake8, isort, pyupgrade, and black in one tool.
+# It runs in milliseconds even on large codebases.
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "RUF", # ruff-specific rules
+]
