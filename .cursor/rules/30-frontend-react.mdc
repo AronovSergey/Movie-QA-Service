@@ -1,0 +1,230 @@
+---
+description: "React frontend conventions (Vite + TypeScript + Tailwind)"
+globs:
+  - "frontend/**"
+  - "**/*.tsx"
+  - "**/*.ts"
+---
+
+# React Frontend Rules
+
+## Stack
+
+- **React 18+** (concurrent features, Suspense)
+- **Vite** for dev server and builds
+- **TypeScript strict mode** — no `any`, no `// @ts-ignore` without a reason and link
+- **Tailwind CSS** for styling — no CSS modules, no styled-components
+- **shadcn/ui** components copied into `src/components/ui/` — modify in place when needed
+- **TanStack Query (React Query v5)** for ALL server state
+- **TanStack Router** or **React Router v6** for routing (pick one, document in ADR)
+- **Zustand** for client-only state (UI state, ephemeral selections) — never for server data
+- **Zod** for runtime validation of API responses
+- **Vitest + Testing Library + msw** for tests
+- **Playwright** for E2E (Phase 7+)
+
+## Project structure
+
+```
+frontend/
+├── package.json
+├── tsconfig.json
+├── vite.config.ts
+├── tailwind.config.ts
+└── src/
+    ├── main.tsx
+    ├── App.tsx
+    ├── api/                    # API client (typed fetch wrappers + Zod schemas)
+    ├── components/
+    │   ├── ui/                 # shadcn primitives
+    │   └── feature/            # feature-specific components
+    ├── features/               # feature folders (chat, auth, conversations)
+    │   └── chat/
+    │       ├── ChatThread.tsx
+    │       ├── MessageBubble.tsx
+    │       ├── useChatStream.ts
+    │       └── chat.test.tsx
+    ├── hooks/                  # cross-cutting hooks
+    ├── lib/                    # utilities (formatters, helpers)
+    ├── routes/                 # route components
+    ├── stores/                 # Zustand stores
+    └── types/                  # shared TypeScript types
+```
+
+## Type discipline
+
+- **`tsconfig.json` has `"strict": true`.** Plus `noUncheckedIndexedAccess`, `noImplicitOverride`, `noFallthroughCasesInSwitch`.
+- **No `any`. Use `unknown` and narrow.** If you genuinely need `any`, comment why.
+- **API responses are validated with Zod at the boundary.** The Zod schema is the source of truth; the TS type is `z.infer<typeof Schema>`.
+- **Discriminated unions for state machines.** A request is `{ status: 'idle' } | { status: 'loading' } | { status: 'success', data: T } | { status: 'error', error: Error }`, not a bag of nullable booleans.
+
+## API client pattern
+
+All API calls go through typed wrappers in `src/api/`:
+
+```typescript
+// src/api/chat.ts
+import { z } from 'zod'
+
+import { apiClient } from './client'
+
+// LEARNING: The Zod schema is the source of truth for the response shape.
+// The TS type is derived from it, so they cannot drift apart.
+export const MessageSchema = z.object({
+  id: z.string().uuid(),
+  conversationId: z.string().uuid(),
+  role: z.enum(['user', 'assistant']),
+  content: z.string(),
+  citations: z.array(CitationSchema).default([]),
+  createdAt: z.string().datetime(),
+})
+
+export type Message = z.infer<typeof MessageSchema>
+
+export async function sendMessage(
+  conversationId: string,
+  content: string,
+): Promise<Message> {
+  const response = await apiClient.post(
+    `/conversations/${conversationId}/messages`,
+    { content },
+  )
+  return MessageSchema.parse(response.data)
+}
+```
+
+## Server state vs client state
+
+- **Server state (anything fetched from the backend) → TanStack Query.** Never `useState` or Zustand for this.
+- **Form state → React Hook Form** (with Zod resolver).
+- **UI state (open/closed, selected, hovered) → `useState` or Zustand.**
+- **Never duplicate server data into Zustand.** TanStack Query is the cache.
+
+## Component conventions
+
+- **Function components with explicit prop types.** No implicit `FC`, no inline prop types beyond trivial cases.
+- **Named exports, not default exports.** Easier refactoring, better grep, no naming inconsistency.
+- **Props interface above the component.** Prefix with the component name: `ChatThreadProps`.
+- **Children explicitly typed:** `children: React.ReactNode` if used.
+- **Components do one thing.** When a component grows past ~150 lines, extract subcomponents.
+- **Custom hooks for non-trivial logic.** A component should read like a description of the UI; logic lives in hooks.
+
+```tsx
+// LEARNING: Named export + explicit Props interface is the standard pattern.
+// Default exports make rename refactors painful and lead to inconsistent
+// import names across the codebase.
+interface ChatThreadProps {
+  conversationId: string
+}
+
+export function ChatThread({ conversationId }: ChatThreadProps) {
+  const { data: messages, isLoading } = useMessages(conversationId)
+  const sendMessage = useSendMessage(conversationId)
+
+  if (isLoading) return <ChatThreadSkeleton />
+  if (!messages) return null
+
+  return (
+    <div className="flex flex-col gap-4">
+      {messages.map((message) => (
+        <MessageBubble key={message.id} message={message} />
+      ))}
+      <MessageInput onSubmit={sendMessage.mutate} />
+    </div>
+  )
+}
+```
+
+## Styling with Tailwind
+
+- **Use utility classes directly.** No `@apply` in CSS files — defeats the purpose.
+- **Group related utilities** in this order: layout → spacing → sizing → typography → colors → effects → state.
+- **Use `clsx` or `cn` (from shadcn) for conditional classes.** Never string concatenation.
+- **Extract repeated class strings into components**, not into utility CSS.
+- **Use design tokens from `tailwind.config.ts`** for colors and spacing. Avoid arbitrary values like `text-[#ff00aa]`.
+
+## Forms
+
+- **React Hook Form + Zod resolver.** Schema defines validation; types are inferred.
+- **One schema, used for both client validation and request typing.**
+- **Submit handlers are async** and return `Promise<void>`.
+- **Disable submit while pending.** Show inline errors, not toast for field validation.
+
+## Streaming (chat responses)
+
+The chat service streams responses via SSE. Pattern:
+
+```tsx
+// LEARNING: We use fetch + ReadableStream rather than EventSource because
+// EventSource doesn't support custom headers (we need Authorization).
+// See ADR-012.
+async function streamAnswer(
+  conversationId: string,
+  content: string,
+  onToken: (token: string) => void,
+): Promise<void> {
+  const response = await fetch(
+    `/api/conversations/${conversationId}/messages/stream`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ content }),
+    },
+  )
+
+  if (!response.body) throw new Error('No response body')
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    const text = decoder.decode(value, { stream: true })
+    onToken(text)
+  }
+}
+```
+
+## Testing
+
+- **Vitest + Testing Library** for unit and component tests.
+- **MSW (Mock Service Worker)** to mock the API at the network level — never mock fetch directly.
+- **Test what the user sees**, not implementation details. `getByRole`, `getByText`, never `getByTestId` unless absolutely necessary.
+- **Co-locate tests** with components: `ChatThread.tsx` + `ChatThread.test.tsx`.
+- **Test names describe behavior:** `'renders empty state when no messages'`, `'submits the message and clears the input'`.
+
+```tsx
+// LEARNING: We test behavior visible to the user, not internal state.
+// "renders the messages" via getByText, not "calls useMessages with the right args".
+test('renders messages from the conversation', async () => {
+  server.use(
+    http.get('/conversations/:id/messages', () =>
+      HttpResponse.json([
+        { id: '1', role: 'user', content: 'Who directed Dune?' },
+      ]),
+    ),
+  )
+
+  render(<ChatThread conversationId="abc" />)
+
+  expect(await screen.findByText('Who directed Dune?')).toBeInTheDocument()
+})
+```
+
+## Performance
+
+- **Code-split routes with `React.lazy`** when bundle gets large.
+- **Memoize lists with `key`** (real keys, never index).
+- **Don't reach for `useMemo`/`useCallback` reflexively.** Profile first; add when measurable.
+- **Lazy-load heavy dependencies** (e.g., `react-markdown`, `prismjs`) in the routes that need them.
+
+## Mistakes to avoid
+
+- **Don't fetch in `useEffect`.** Use TanStack Query.
+- **Don't store derived data in state.** Compute it during render.
+- **Don't use `setTimeout` to "wait for state".** State updates are synchronous within React's batch.
+- **Don't put env variables directly in code.** Use `import.meta.env.VITE_*` and validate them at startup with Zod.
+- **Don't use `dangerouslySetInnerHTML` with LLM output.** Sanitize first or use `react-markdown` (which is safe).

@@ -1,0 +1,99 @@
+---
+alwaysApply: true
+description: "Core project conventions and engineering philosophy"
+---
+
+# Movie QA Service — Core Conventions
+
+You are working on a polyglot microservices project: a movie/TV/people Q&A service powered by RAG. The project uses React (frontend), Spring Boot (Java backend services), and Python (FastAPI for the RAG service, workers for ingestion).
+
+## Dual mandate (read this first, every time)
+
+This project has two simultaneous goals that you must honor in every response:
+
+1. **Code quality bar: senior engineer, ~10 years of experience.** The code that ships looks like a senior wrote it. Strong typing, proper error handling, idempotent operations, well-named abstractions, sensible boundaries, real tests. No "good enough for a hobby project" shortcuts in the *code itself*.
+
+2. **Learning-friendly: heavy comments and decision context.** This is a solo learning project. Comments are *more verbose than typical* — explain *why* a non-obvious choice was made, link to ADRs when relevant, and mark `// LEARNING:` or `# LEARNING:` blocks where the goal is to teach a pattern. ADRs (Architecture Decision Records) live in `docs/adr/` and should be referenced from code when the choice is non-obvious.
+
+**These do not conflict.** Senior engineers write strict code AND document non-obvious decisions. What you must NOT do is use the "learning project" framing to justify sloppy code, missing tests, or `any` types. The bar on code stays high; the comments stay generous.
+
+## Architecture summary
+
+The system is divided into three planes (see `docs/architecture.svg` and `README.md`):
+
+- **Request plane** (user-facing, sync): React → API Gateway → Auth | Chat | Catalog → RAG service
+- **Ingestion plane** (background, async): Scheduler → RabbitMQ → Ingestion workers → External APIs
+- **Shared data plane**: Postgres (schemas per service), Qdrant (vector DB), Redis (cache + sessions)
+
+The two planes never share request handling. They share data only. **Never put background work in the request path. Never expose ingestion endpoints publicly.**
+
+## Repository layout
+
+```
+.
+├── docker-compose.yml
+├── Makefile
+├── docs/
+│   ├── architecture.svg
+│   └── adr/                        # Architecture Decision Records
+├── frontend/                       # React + Vite + TS
+├── services/
+│   ├── auth/                       # Spring Boot — JWT, users
+│   ├── chat/                       # Spring Boot — conversations
+│   ├── catalog/                    # Spring Boot — movies/people read API
+│   ├── scheduler/                  # Spring Boot — cron + admin trigger
+│   ├── gateway/                    # Spring Cloud Gateway
+│   ├── rag/                        # FastAPI — retrieval + LLM
+│   └── ingestion/                  # Python — RabbitMQ workers
+├── infra/                          # Prometheus, Grafana, Langfuse configs
+└── eval/                           # RAG evaluation suite
+```
+
+## Universal engineering rules
+
+### Never do these
+
+- **Never use `any` in TypeScript or untyped `dict` returns in Python public APIs.** If you need a flexible type, define a discriminated union or a Pydantic model. Typed code is the foundation of senior-looking output.
+- **Never commit secrets.** Use `.env` files (gitignored) and document the required keys in `.env.example`.
+- **Never write production code without tests.** A function without tests is incomplete. The test does not have to be exhaustive, but it must exist.
+- **Never skip error handling.** Every external call (DB, HTTP, broker, LLM) must handle failure. Either propagate with context or recover with a documented strategy.
+- **Never make non-idempotent operations.** Especially in the ingestion plane: every worker action must be safe to retry. Use upserts with deterministic keys.
+- **Never put `console.log` / `print()` debug statements in committed code.** Use the project's logger.
+- **Never use blocking I/O in async functions.** In FastAPI, use `httpx.AsyncClient`, `asyncpg`, etc. — not `requests` or sync DB calls.
+- **Never hard-code URLs, ports, or magic numbers.** Use config (env vars, `application.yml`, settings).
+
+### Always do these
+
+- **Always write the test alongside the code.** Not after — alongside. If you are writing a service method, write its test in the same response.
+- **Always use the project's structured logger** with correlation IDs (`request_id`, `trace_id`).
+- **Always validate inputs at service boundaries.** Pydantic on Python boundaries, Bean Validation (`@Valid`, `@NotNull`, etc.) on Spring controllers.
+- **Always handle the idempotency case** for any worker, scheduled job, or webhook handler. Document what makes the operation idempotent (a `// IDEMPOTENT:` comment is welcome).
+- **Always include a "LEARNING:" comment** when introducing a pattern that is unusual or where someone with less experience might be confused. Be generous with these. Examples: explaining why a particular Spring annotation is used, why a chunk has overlap, why we prefer upsert over insert.
+- **Always reference the relevant ADR** when implementing a decision that has one. Format: `// See ADR-007: Why we use Qdrant over pgvector`.
+- **Always think about failure modes** before saying "done." What happens if the network drops? If the DB is unreachable? If the LLM returns an empty string? Document or handle each.
+
+### Comment density
+
+Comments lean toward "more than usual" because of the learning mandate, but should be *useful*, not noise:
+
+- **YES**: explain non-obvious *why* (`# LEARNING: We embed the question with the same model used at ingestion — different models live in different vector spaces and aren't comparable`)
+- **YES**: warn about pitfalls (`// WARNING: Do not change the chunk_id format — it must remain deterministic for idempotent upserts`)
+- **YES**: link to ADRs (`# See docs/adr/0003-rabbitmq-over-kafka.md`)
+- **NO**: restating what the code does (`// increment counter` above `counter++`)
+- **NO**: TODOs without an issue link (use `// TODO(#42): ...` referencing a real GitHub issue)
+
+## Naming conventions
+
+- **Files**: kebab-case for TS, snake_case for Python, PascalCase for Java classes
+- **Database tables**: snake_case, plural (`movies`, `conversations`, `messages`)
+- **Database columns**: snake_case (`created_at`, `tmdb_id`)
+- **Java**: PascalCase classes, camelCase methods/fields, UPPER_SNAKE_CASE constants
+- **Python**: snake_case everywhere except classes (PascalCase) and constants (UPPER_SNAKE_CASE)
+- **TypeScript**: camelCase variables/functions, PascalCase types/components, UPPER_SNAKE_CASE constants
+- **Topics/queues**: dot-separated, past-tense for events, present-tense for commands (`ingest.requested`, `movie.indexed`, `answer.ready`)
+
+## When in doubt
+
+If a request is ambiguous between "quick hack" and "proper implementation", **always pick proper implementation**. The user is here to learn how senior engineers build systems. Saving them 10 minutes by skipping a test costs them the lesson the test would have taught.
+
+If a request would compromise the architectural separation (e.g., "let's just put ingestion in the chat service for now"), push back politely. Suggest the right pattern, explain why the shortcut hurts, then offer a minimal version of the right thing if scope is the concern.

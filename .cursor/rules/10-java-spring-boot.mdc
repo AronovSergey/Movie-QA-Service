@@ -1,0 +1,148 @@
+---
+description: "Spring Boot service conventions (Java 21, Spring Boot 3)"
+globs:
+  - "services/auth/**"
+  - "services/chat/**"
+  - "services/catalog/**"
+  - "services/scheduler/**"
+  - "services/gateway/**"
+  - "**/*.java"
+  - "**/pom.xml"
+  - "**/build.gradle"
+---
+
+# Spring Boot Service Rules
+
+## Stack
+
+- **Java 21** (use modern features: records, sealed classes, pattern matching, virtual threads where appropriate)
+- **Spring Boot 3.2+**
+- **Maven** (use the `./mvnw` wrapper)
+- **PostgreSQL 16** via Spring Data JPA
+- **Liquibase or Flyway** for migrations (pick one per service, document choice in ADR)
+- **JUnit 5 + AssertJ + Mockito + Testcontainers** for tests
+- **Lombok** is allowed but used sparingly: `@RequiredArgsConstructor` for DI, `@Slf4j` for loggers, `@Value` / `@Builder` for value objects. Avoid `@Data` on JPA entities.
+
+## Layered architecture
+
+Strict three-layer pattern per service:
+
+```
+controller/   — REST endpoints, validation, DTO ↔ domain mapping
+service/      — business logic, transactions, orchestration
+repository/   — JPA repositories, native queries
+domain/       — entities + value objects
+dto/          — request/response DTOs (records)
+config/       — @Configuration classes
+```
+
+**Controllers never touch repositories directly.** Always go through a service.
+**Entities never leave the service layer.** Map to DTOs before returning to controllers.
+**DTOs are records.** `public record CreateUserRequest(@NotBlank String email, @NotBlank String password) {}`
+
+## Validation
+
+- **Every controller method that accepts a body uses `@Valid`** on the DTO parameter.
+- **DTOs use Jakarta Validation annotations** (`@NotNull`, `@NotBlank`, `@Email`, `@Size`).
+- **Custom validations** go in dedicated `Validator` classes annotated with `@Component`.
+- **Service layer also validates** business rules that aren't expressible at the DTO level (uniqueness, state transitions, authorization).
+
+## Error handling
+
+- **Use `@RestControllerAdvice` with `@ExceptionHandler`** for centralized error mapping.
+- **Define a domain exception hierarchy:** `DomainException` (base, abstract) → `NotFoundException`, `ConflictException`, `ValidationException`, `UnauthorizedException`.
+- **Return `ProblemDetail` (RFC 7807)** for error responses, not bare strings.
+- **Log at the boundary** (controller advice) with the correlation ID; log at INFO for 4xx, ERROR for 5xx.
+- **Never catch `Exception` generically.** Catch specific types or let them bubble.
+
+## Persistence
+
+- **Migrations are mandatory.** Schema changes always go through Liquibase/Flyway. Never use `ddl-auto: update` outside `application-test.yml`.
+- **Use `@Transactional` deliberately.** Default to `readOnly = true` on read methods. Place at the service layer, not controller or repository.
+- **Optimistic locking with `@Version`** on entities that may be concurrently modified.
+- **Avoid N+1 queries.** Use `@EntityGraph`, `JOIN FETCH`, or projection DTOs. Set `spring.jpa.properties.hibernate.generate_statistics=true` in dev.
+
+## Testing
+
+- **Three test layers per service:**
+
+  1. **Unit tests** (`*Test.java` in `src/test/java`): pure logic, mock collaborators with Mockito. Fast, run on every save.
+  2. **Slice tests** (`@WebMvcTest`, `@DataJpaTest`): exercise one Spring layer.
+  3. **Integration tests** (`*IT.java` in `src/test/java`, run by Failsafe): full Spring context with **Testcontainers** for Postgres / RabbitMQ. Real DB, real broker, real wiring.
+
+- **Testcontainers is non-negotiable** for any test that touches Postgres or RabbitMQ. Mocking JPA is a code smell.
+
+- **AssertJ over JUnit assertions:** `assertThat(result).isEqualTo(expected)` not `assertEquals(expected, result)`.
+
+- **Test naming:** `methodName_condition_expectedResult()`.
+  Example: `createUser_whenEmailAlreadyExists_throwsConflictException()`.
+
+- **Coverage targets:** 80%+ on service layer, controllers via slice tests, repositories via integration tests. **Coverage is a side effect, not a goal** — never write a test purely to hit a number.
+
+## Configuration
+
+- **`application.yml`** with profile-specific overrides (`application-dev.yml`, `application-test.yml`, `application-prod.yml`).
+- **All secrets via environment variables.** Use `${VAR_NAME:default}` syntax sparingly; required secrets should fail loudly if missing.
+- **Type-safe config classes** with `@ConfigurationProperties`, validated with `@Validated`.
+
+## Observability
+
+- **Use SLF4J via `@Slf4j`** Lombok annotation. Never use `System.out.println`.
+- **Structured logs:** include `correlation_id`, `user_id`, `operation` as MDC context.
+- **Micrometer for metrics:** annotate critical methods with `@Timed`. Expose `/actuator/prometheus`.
+- **OpenTelemetry** for distributed tracing across service boundaries.
+
+## Spring-specific gotchas to avoid
+
+- **Don't use field injection.** Constructor injection only (`@RequiredArgsConstructor` + `final` fields).
+- **Don't return `Optional` from controllers.** Convert to either the value or a `NotFoundException`.
+- **Don't use `@Autowired` on constructors.** It's redundant in modern Spring.
+- **Don't expose JPA entities through REST.** Always map to DTO records.
+- **Don't use `@Transactional` on private methods.** Spring's proxy-based AOP won't apply.
+- **Don't catch and rethrow without context.** If you wrap, include the original cause and add information.
+
+## Spring Cloud Gateway specifics (gateway service only)
+
+- **JWT validation as a global filter** before routing.
+- **Inject user context as headers** (`X-User-Id`, `X-User-Roles`) for downstream services.
+- **CORS configured at the gateway only**, not in individual services.
+- **Rate limiting via Redis-backed `RequestRateLimiter`** filter.
+
+## Scheduler service specifics
+
+- **Use `@Scheduled` for cron triggers.** Document the schedule with a `// LEARNING:` comment explaining cron syntax.
+- **The scheduler does NO business logic.** It only publishes events to RabbitMQ. Workers do the work.
+- **If multiple scheduler instances might run, use a distributed lock** (ShedLock with Redis or Postgres) to prevent duplicate triggers.
+- **Admin endpoints (`/admin/**`) gated by separate admin auth**, not user JWT.
+
+## Example controller (canonical structure)
+
+```java
+@RestController
+@RequestMapping("/conversations")
+@RequiredArgsConstructor
+@Slf4j
+public class ConversationController {
+
+    private final ConversationService conversationService;
+    private final ConversationMapper mapper;
+
+    /**
+     * Creates a new conversation for the authenticated user.
+     *
+     * LEARNING: User ID comes from the gateway-injected X-User-Id header,
+     * NOT from the request body. The gateway validates the JWT and trusts
+     * downstream services with the resolved identity. See ADR-005.
+     */
+    @PostMapping
+    public ResponseEntity<ConversationResponse> create(
+            @RequestHeader("X-User-Id") UUID userId,
+            @Valid @RequestBody CreateConversationRequest request) {
+
+        var conversation = conversationService.create(userId, request.title());
+        return ResponseEntity
+                .status(HttpStatus.CREATED)
+                .body(mapper.toResponse(conversation));
+    }
+}
+```

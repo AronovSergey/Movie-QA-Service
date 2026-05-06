@@ -1,0 +1,130 @@
+---
+description: "RAG-specific conventions: retrieval, embeddings, prompts, evaluation"
+globs:
+  - "services/rag/**"
+  - "services/ingestion/**"
+  - "eval/**"
+---
+
+# RAG Engineering Rules
+
+These rules apply specifically to the AI/ML side of the system: retrieval logic, prompt construction, embedding pipelines, and evaluation. Quality issues here are subtle and rarely caught by traditional tests — special discipline is required.
+
+## The cardinal rule: separate retrieval from generation
+
+**Never** write a single function that goes from question to answer. Always:
+
+1. A retriever that takes a question and returns chunks.
+2. A prompt builder that takes chunks and a question and returns a prompt.
+3. A generator that takes a prompt and returns an answer.
+
+This separation is testable, debuggable, and lets you swap any layer independently. Bundling them is the single most common source of AI engineering pain.
+
+## Embedding consistency
+
+- **Pin the embedding model in config.** Never let it be implicit.
+- **Embedding model used at retrieval MUST equal embedding model used at ingestion.** Any mismatch silently destroys retrieval quality. Add a startup check that compares the configured model to the model name stored in Qdrant collection metadata.
+- **Document that re-embedding is required for model changes.** A `# WARNING:` comment near the model config is appropriate.
+- **Embed text identically at ingestion and query time.** Same preprocessing, same prefixes (some models like BGE require prefixes). If you use BGE, document the prefix in code:
+
+```python
+# LEARNING: BGE models require a prefix for asymmetric retrieval.
+# The query gets a different prefix than the document. See the model card.
+QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
+```
+
+## Chunking
+
+- **Chunk size and overlap are configured, not hard-coded.** Default: 500 tokens, 50 overlap.
+- **Chunks have deterministic IDs.** Format: `{source_type}_{source_id}_{chunk_field}_{chunk_index}`.
+  Example: `tmdb_438631_overview_0`.
+- **Idempotent upserts.** Re-chunking the same source produces identical chunk IDs, so re-running ingestion is a no-op for unchanged data.
+- **Track the source.** Every chunk's metadata includes: `movie_id` or `person_id`, `source` (e.g., `tmdb_overview`, `wiki_biography`), and `chunk_index`. These are used for filtering and citation.
+- **Document-aware chunking is preferred** when the source has structure. A movie's overview is one chunk by default. A long biography is split by section. Configure chunking strategy per source type.
+
+## Prompt construction
+
+- **Prompts are built by pure functions** (no side effects, deterministic output for given input). This makes them snapshot-testable.
+- **System prompts live in `prompts/` directory as `.txt` or `.md` files**, not embedded as Python strings. Easier to diff, version, and review.
+- **Always include the "answer only from context" instruction** for RAG prompts:
+
+```
+You are a movie expert. Answer the user's question using only the provided
+context. If the context does not contain the answer, say "I don't have
+enough information to answer that." Do not invent facts.
+```
+
+- **Include citations in the format you want them returned.** If you want the model to cite chunks by ID, show it the format in the prompt. Don't expect it to invent a citation format.
+- **Token budget management.** Compute the prompt length before sending; if context is too large, drop lowest-relevance chunks first. Don't blindly truncate — log a warning and prefer fewer chunks of the right material.
+
+## Generation
+
+- **Use the cheapest model that meets quality bar.** Default: Claude Haiku 4.5. Switch to Sonnet only if the eval set demands it.
+- **Set `temperature=0` for factual Q&A.** Higher temperature is for creative tasks.
+- **Set `max_tokens` explicitly.** Default 1024 for answers; raise only if eval set has long-form questions.
+- **Always pass a `system` message** with the role + instructions. User messages contain only the user's question + retrieved context.
+- **Stream responses** for user-facing chat. Buffer for ingestion-time use cases.
+- **Implement retries with exponential backoff** for rate limits and transient errors. Use `tenacity`. Do NOT retry on validation errors or 4xx responses.
+- **Track tokens and cost per request.** Log them at INFO. Aggregate by user/conversation/feature in metrics.
+
+## Citations
+
+Citations are not optional. Every answer must be traceable to its sources.
+
+- **Return chunk IDs and snippets, not just chunk IDs.** The frontend renders snippets so users see what informed the answer.
+- **Cite at the answer level, not in-line.** The LLM can use `[1]` markers if you want, but the citations array attached to the response is the canonical record.
+- **Verify citations exist.** If the LLM mentions chunks not in the retrieved set (rare but happens), strip them. Log a warning.
+
+## Evaluation
+
+This is the most under-invested area in RAG projects. Take it seriously from day one.
+
+- **Maintain `eval/golden.jsonl`** with question/expected-answer/expected-citations triples.
+- **Start with 10 examples in Phase 1.** Grow to 50-100 by Phase 8.
+- **Categories to cover:** factual lookup, recommendation, comparison, "I don't know" cases, edge cases (typos, ambiguous references, very recent movies).
+- **Evaluation runner outputs a score report** with per-question pass/fail and an overall score.
+- **Run evals on every change to retrieval, prompts, or model config.** Add `make eval` and run it in CI for relevant PRs.
+- **Use LLM-as-judge cautiously.** It is biased toward verbose answers. Combine with manual review for tricky cases.
+
+## Caching
+
+- **Cache LLM responses keyed on the full prompt hash during development.** Saves money and time. Use `diskcache` or Redis.
+- **Production cache should key on `(question_normalized, top_k_chunk_ids)`** — same retrieval + same question = same cached answer.
+- **Cache TTL is short** (24h). The catalog updates; old answers become stale.
+- **Never cache personalized prompts.** If the prompt includes user-specific context, do not cache.
+
+## Observability for RAG
+
+- **Use Langfuse (self-hosted) for LLM tracing.** Every request: prompt, retrieved chunks, response, latency, cost, model. This is invaluable when answers are bad.
+- **Log retrieval results explicitly.** "Question X retrieved chunks [a, b, c, d, e] with scores [0.91, 0.87, 0.84, 0.81, 0.77]." When a question fails, this tells you whether retrieval failed (no relevant chunks) or generation failed (good chunks, bad answer).
+- **Track these metrics:**
+  - Embedding latency (p50, p95)
+  - Vector search latency
+  - LLM latency
+  - End-to-end answer latency
+  - Tokens per request
+  - Cost per request
+  - Retrieval recall (when running eval)
+  - Answer quality score (when running eval)
+
+## Common failure modes — recognize and fix
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| LLM invents facts | "Answer only from context" missing or weak | Strengthen system prompt; add explicit refusal example |
+| LLM refuses despite good context | Over-strict refusal prompt | Adjust prompt; show example of when to answer |
+| Retrieval misses obvious matches | Chunk too big (averaged meaning) | Smaller chunks, or document-aware chunking |
+| Retrieval returns wrong domain | No metadata filtering | Add filter by `movie_id` / `source` based on intent |
+| Answer is correct but citations are wrong | LLM citing what it "knows" not what it was given | Constrain citation format; verify post-hoc |
+| Answers vary day to day | `temperature > 0`, or model auto-updated | Set `temperature=0`; pin model version |
+| Embeddings retrieve nothing useful | Embedding model mismatch ingestion vs query | Check model names match exactly |
+| New movies don't appear in answers | Ingestion not re-running, or cache stale | Verify scheduler firing; clear answer cache |
+
+## What NOT to do
+
+- **Do not use LangChain agents or chains** for the core RAG loop. Write the loop yourself. The transparency is the point of this project.
+- **Do not use `temperature > 0` for factual Q&A.** Reproducibility matters.
+- **Do not build retrieval on top of full-text search alone** for semantic questions. Embeddings exist for a reason.
+- **Do not embed content that won't be searched.** Wasted compute and storage. If a field is never queried semantically, store it in Postgres.
+- **Do not concatenate all retrieved chunks into one giant prompt without thought.** Order matters (most relevant last works well for some models). Token budget matters. Format matters.
+- **Do not optimize before measuring.** Get a baseline. Measure with the eval set. Then improve.

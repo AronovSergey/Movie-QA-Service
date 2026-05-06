@@ -1,0 +1,166 @@
+---
+alwaysApply: true
+description: "Process discipline: ADRs, git hygiene, secrets, learning notes"
+---
+
+# Process & Discipline Rules
+
+These rules govern *how* we work, not *what* we build. They apply globally.
+
+## Architecture Decision Records (ADRs)
+
+ADRs document significant decisions so future-you (and future collaborators) can understand why the system is the way it is.
+
+- **Location:** `docs/adr/NNNN-short-title.md` (zero-padded, e.g., `0001-monorepo-structure.md`)
+- **Format:** the standard "Context / Decision / Consequences" template
+- **When to write one:** any time a decision is non-obvious or has alternatives that were considered and rejected
+- **When to reference one:** in code, near the implementation of the decided pattern (`// See ADR-0007: Why we use Qdrant over pgvector`)
+- **ADRs are immutable.** When a decision changes, write a new ADR that supersedes the old one. Mark the old one with a `Status: Superseded by ADR-NNNN` line — don't delete or rewrite.
+
+### ADR template
+
+```markdown
+# ADR-0007: Use Qdrant as the vector database
+
+## Status
+
+Accepted — 2026-04-15
+
+## Context
+
+We need a vector database to store chunk embeddings and serve semantic search.
+Options considered:
+
+- **pgvector** (Postgres extension): simpler infra, weaker filtering/scaling
+- **Qdrant**: dedicated vector DB, strong filtering, easy Docker setup
+- **Pinecone**: managed, costs money
+
+## Decision
+
+We use Qdrant, self-hosted via Docker.
+
+## Consequences
+
+**Positive:**
+- One concept ("collection") for all chunks across services
+- Strong metadata filtering matches our hybrid retrieval needs
+- Free for solo learning project
+
+**Negative:**
+- One more service to operate
+- Migration to managed (Qdrant Cloud or Pinecone) requires data export
+- Adds a new failure mode separate from Postgres
+
+## Notes
+
+For a project under ~1M chunks with Postgres already in the stack,
+pgvector would be a defensible alternative. Document if the choice
+should be revisited.
+```
+
+### Suggested early ADRs to write
+
+You don't have to write all of these on day one, but as you build, write ADRs for:
+
+- Monorepo vs polyrepo
+- Spring Boot version & Java version
+- Postgres schema-per-service vs shared schema
+- Qdrant vs pgvector
+- RabbitMQ vs Kafka
+- LLM provider (Anthropic vs OpenAI vs both)
+- Embedding model and the implications for re-indexing
+- Auth strategy (JWT structure, refresh token storage)
+- Streaming protocol (SSE vs WebSocket)
+- API gateway choice
+- CI provider and pipeline shape
+- Local-only vs deployed dev environment
+
+## Git hygiene
+
+- **Conventional commits.** Every commit message starts with `feat:`, `fix:`, `chore:`, `docs:`, `test:`, `refactor:`, `perf:`, or `build:`. The first line ≤ 72 chars. Body wraps at 72.
+- **Branch per feature/fix.** Never commit directly to `main`. Branch names: `feat/streaming-responses`, `fix/duplicate-chunks-on-retry`.
+- **Squash merges into main.** Keep `main` history readable; preserve detail in PR descriptions.
+- **Tag at phase boundaries.** When a phase from `IMPLEMENTATION_PLAN.md` is complete, tag the repo (`phase-3-chat-service`). Easy to compare snapshots later.
+- **No commented-out code.** Delete it. Git has the history.
+- **Each commit should leave the build green.** No "WIP" commits in main. If you're sharing a WIP, it's a draft PR.
+
+## Pull request discipline
+
+Every non-trivial change goes through a PR even on a solo project. The discipline of writing the PR description is the value.
+
+- **PR title** matches the conventional commit summary.
+- **PR description** explains *why*, not *what* (the diff shows the what).
+- **Checklist:**
+  - [ ] Tests added/updated
+  - [ ] ADR added/updated if a significant decision
+  - [ ] README/docs updated if user-facing
+  - [ ] Eval still passes (if RAG-affecting)
+  - [ ] No new lint warnings
+  - [ ] No secrets committed
+
+## Secrets management
+
+- **Never commit secrets.** Not in code, not in config files, not in `.env`, not in README.
+- **`.env` is gitignored.** `.env.example` lists required variable names with placeholder values.
+- **Required secrets fail loudly at startup.** Pydantic Settings without a default raises if missing. Same in Spring with `@Validated` config classes.
+- **In CI:** GitHub Actions secrets, scoped per environment.
+- **Rotate after exposure.** Even if it's "just a dev key," rotate immediately.
+
+## Configuration and environments
+
+- **Three environments to think about:** `dev` (your machine, full stack in Docker), `test` (CI, ephemeral), `prod` (whatever you eventually deploy to, even if just for personal use).
+- **Configuration via env vars** in all environments. Defaults in code are for local dev only.
+- **Profile-based configs** (Spring profiles, env-specific Pydantic settings) make environment differences explicit.
+
+## Code review with yourself
+
+Solo project, but use the discipline:
+
+- **Read your own diff before merging.** Out loud, slowly. You catch dumb things this way.
+- **Pretend a senior is reviewing.** Would they ask "why did you do it this way"? Add a comment or ADR before they do.
+- **Resist scope creep.** If you find a bug while building feature X, file an issue and fix it in a separate PR.
+
+## Documentation alongside code
+
+- **Each service has its own README.** What it does, how to run it, how to test it, what env vars it needs.
+- **Public functions/methods have docstrings/Javadoc.** Explain *why* the function exists and any non-obvious contract details. Avoid restating the signature.
+- **Complex algorithms have comment headers** describing the approach before the code.
+- **The architecture diagram lives in the repo** as `docs/architecture.svg` and is referenced from the root README.
+
+## Learning notes
+
+This project is for learning. Capture what you learn:
+
+- **`docs/learnings/`** is a directory for learning notes. Markdown files, dated and titled.
+  Example: `2026-05-12-why-async-postgres-needs-asyncpg.md`
+- **Write one when:** you got stuck for >30 minutes, you discovered a non-obvious fact, you made a mistake worth remembering.
+- **Format is freeform** but include:
+  - Symptom you saw
+  - What you tried
+  - What worked
+  - The general lesson
+- **These are not ADRs.** ADRs document decisions; learnings document insights.
+
+## When the AI suggests a shortcut
+
+If a request to Cursor (or a Cursor suggestion) would compromise these rules — skip a test, use `any`, skip ADR for a big decision, hard-code a secret, mix planes — push back. Either:
+
+1. Suggest the proper version with a brief explanation of why the shortcut hurts long-term.
+2. Offer a minimal version of the proper approach if scope is the real concern.
+3. Ask whether the user wants to proceed with the shortcut anyway (they might; it's their call) — but note it explicitly so they make the choice consciously.
+
+## Definition of done
+
+A piece of work is done when:
+
+- [ ] Code is written and passes lint + typecheck
+- [ ] Tests are written and pass
+- [ ] Integration tests touch real infrastructure (Testcontainers) where applicable
+- [ ] A `// LEARNING:` comment is added if the pattern is non-obvious
+- [ ] An ADR is written if a significant decision was made
+- [ ] README is updated if anything user-facing changed
+- [ ] A PR is opened with a clear description
+- [ ] CI is green
+- [ ] Future-you can understand the change in 6 months
+
+"It works on my machine" is not done.

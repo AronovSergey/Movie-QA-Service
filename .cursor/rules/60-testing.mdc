@@ -1,0 +1,175 @@
+---
+description: "Testing philosophy and patterns across all services"
+globs:
+  - "**/*test*"
+  - "**/*Test*"
+  - "**/test/**"
+  - "**/tests/**"
+  - "**/__tests__/**"
+  - "eval/**"
+---
+
+# Testing Rules
+
+Tests are not optional. They are part of the code. A function without a test is incomplete.
+
+## The pyramid (with annotations)
+
+```
+        /\
+       /E2\         A few. Critical user journeys only.
+      /----\        Slow, brittle, but catch what nothing else does.
+     / Intg \       Meaningful number. Real DB, real broker.
+    /--------\      Testcontainers everywhere it matters.
+   /  Unit    \     Many. Pure logic, mocked I/O. Run on every save.
+  /------------\    Fast (sub-second), reliable, focused.
+```
+
+## Universal principles
+
+- **Test behavior, not implementation.** A test that breaks when you refactor without changing behavior is a bad test.
+- **One assertion per concept.** Multiple `expect`/`assert` calls are fine if they're testing the same concept (e.g., a returned object's fields).
+- **Arrange-Act-Assert structure.** Visually distinguishable in every test.
+- **Independent tests.** Order must not matter. No shared mutable state across tests.
+- **Deterministic.** Flaky tests are worse than no tests because they erode trust. Fix or delete them; never accept them.
+- **Fast feedback loop.** Unit tests must run in milliseconds. Integration tests in seconds. Anything slower needs a clear reason.
+
+## What to test (priorities)
+
+1. **Business logic** — services, domain functions, validation. The why-this-codebase-exists code.
+2. **Failure paths** — what happens when the DB is down, the API times out, the LLM returns garbage. These tests catch the bugs that hurt most.
+3. **Idempotency** — every consumer, every retry-able operation. Mandatory.
+4. **Boundaries** — DTOs, schemas, validation. Wrong inputs should be rejected with clear errors.
+5. **Critical paths** — login, send-message, ingest-movie. These get end-to-end tests.
+
+## What NOT to test (or test lightly)
+
+- Trivial getters/setters / Lombok-generated code.
+- Framework configuration (test the framework's tests once, don't replicate them).
+- Constants and pure data definitions.
+- The third-party library itself.
+
+## Java/Spring Boot
+
+- **Unit tests:** plain JUnit 5 + Mockito. Fast. No `@SpringBootTest`.
+- **Slice tests:** `@WebMvcTest` (controller layer), `@DataJpaTest` (repository layer with H2 or Testcontainers).
+- **Integration tests** with `@SpringBootTest` + Testcontainers for Postgres/RabbitMQ. Naming convention: `*IT.java`, run by Maven Failsafe in a separate phase.
+- **AssertJ for assertions:** `assertThat(result).hasSize(2).extracting("name").contains("Dune")`.
+- **Test fixtures:** small `@TestConfiguration` classes for shared beans, `@Sql` for DB state.
+
+```java
+// Naming: methodName_condition_expectedResult
+@Test
+void createConversation_whenValidRequest_persistsAndReturnsConversation() {
+    // Arrange
+    var userId = UUID.randomUUID();
+    var request = new CreateConversationRequest("My chat");
+
+    // Act
+    var result = conversationService.create(userId, request.title());
+
+    // Assert
+    assertThat(result.id()).isNotNull();
+    assertThat(result.userId()).isEqualTo(userId);
+    assertThat(result.title()).isEqualTo("My chat");
+    verify(repository).save(any(Conversation.class));
+}
+```
+
+## Python/FastAPI
+
+- **`pytest` + `pytest-asyncio` (auto mode)** — no need to decorate every async test.
+- **Fixtures in `conftest.py`** at the appropriate scope. Module-scoped Testcontainers for speed.
+- **`testcontainers-python`** for real Postgres/RabbitMQ in integration tests.
+- **`httpx.ASGITransport`** for testing FastAPI endpoints without a running server.
+- **`syrupy`** for snapshot tests of prompts and other text artifacts.
+- **`mark.integration`** to separate integration tests from unit tests.
+
+```python
+@pytest.mark.asyncio
+async def test_retriever_returns_top_k_chunks_ordered_by_similarity(
+    retriever: Retriever,
+    populated_qdrant: AsyncQdrantClient,
+) -> None:
+    # Arrange
+    question = "Who directed Dune?"
+
+    # Act
+    chunks = await retriever.retrieve(question, top_k=3)
+
+    # Assert
+    assert len(chunks) == 3
+    assert chunks[0].score > chunks[1].score > chunks[2].score
+    assert any("Villeneuve" in c.text for c in chunks)
+```
+
+## React/TypeScript
+
+- **Vitest + Testing Library + MSW.** Mock at the network layer, not at the module layer.
+- **Co-locate tests** with components: `Foo.tsx` + `Foo.test.tsx`.
+- **`getByRole` over `getByTestId`.** Test what the user can perceive.
+- **`userEvent` over `fireEvent`** for interactions. Closer to real user behavior.
+- **Wait for async with `findBy*`** queries, not arbitrary `waitFor` timeouts.
+
+```tsx
+test('submits a message and clears the input', async () => {
+  const user = userEvent.setup()
+  server.use(
+    http.post('/conversations/:id/messages', () =>
+      HttpResponse.json({
+        id: '1',
+        role: 'user',
+        content: 'Who directed Dune?',
+      }),
+    ),
+  )
+
+  render(<ChatThread conversationId="abc" />)
+
+  const input = screen.getByRole('textbox', { name: /message/i })
+  await user.type(input, 'Who directed Dune?')
+  await user.click(screen.getByRole('button', { name: /send/i }))
+
+  expect(await screen.findByText('Who directed Dune?')).toBeInTheDocument()
+  expect(input).toHaveValue('')
+})
+```
+
+## RAG-specific testing
+
+The RAG pipeline needs special tests beyond traditional unit tests:
+
+- **Snapshot tests for prompts.** Use `syrupy` (Python) or `vitest`'s built-in snapshots. Prompts are sensitive to whitespace, ordering, and formatting; snapshots catch regressions.
+- **Retrieval tests** with a known seeded Qdrant: assert known queries return expected chunks.
+- **Eval tests** in `eval/`. Run the full RAG pipeline against `golden.jsonl` and report scores. Run in CI on PRs that touch retrieval, prompts, or model config.
+- **Idempotency tests** for ingestion: run the pipeline twice on the same input, assert no duplicate rows or chunks.
+
+## Coverage
+
+- **Coverage is a side effect, not a goal.** Aim for ~80% on logic-heavy modules; don't game the number.
+- **Don't test what's already tested by the framework.** Spring's `@Repository` works; you don't need to test that JPA works.
+- **`pytest-cov` for Python, JaCoCo for Java, Vitest's built-in for TS.**
+
+## CI
+
+- **Every push runs:** lint, typecheck, unit tests.
+- **Every PR runs:** all of the above plus integration tests with Testcontainers.
+- **PRs touching `services/rag/` or `eval/` run the eval suite.** Failing eval (>5% drop in score) blocks the merge.
+- **Coverage report posted as PR comment** but does not block merges.
+
+## When you find a bug
+
+1. **Reproduce with a failing test first.**
+2. **Fix the code.**
+3. **Verify the test passes.**
+4. **Commit the test and fix together.**
+
+This discipline prevents regressions and builds a regression test suite organically over time.
+
+## Things to actively avoid
+
+- **Don't mock what you own.** If you're mocking your own service to test another of your services, you've coupled them too tightly. Use Testcontainers for the real thing.
+- **Don't use `Thread.sleep` or `setTimeout` in tests.** Use proper synchronization (await, polling with timeout, framework-provided async helpers).
+- **Don't share state between tests** via static fields, file system, or database without per-test cleanup.
+- **Don't test private methods directly.** If they're worth testing, they're worth being public on a collaborator class.
+- **Don't write tests after-the-fact "for coverage".** Write them alongside the code or not at all.

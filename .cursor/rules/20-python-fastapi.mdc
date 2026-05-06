@@ -1,0 +1,244 @@
+---
+description: "Python service conventions (FastAPI for RAG, workers for ingestion)"
+globs:
+  - "services/rag/**"
+  - "services/ingestion/**"
+  - "**/*.py"
+  - "**/pyproject.toml"
+---
+
+# Python Service Rules
+
+## Stack
+
+- **Python 3.12** (use modern type hints: `list[str]`, `dict[str, int]`, `X | None`, no `Optional[X]`)
+- **`uv`** as the package manager (`uv add`, `uv run`, `uv sync`). Not pip, not poetry, not pdm.
+- **FastAPI** for HTTP services (RAG service)
+- **Pydantic v2** for all data validation and schemas
+- **`httpx.AsyncClient`** for outbound HTTP (never `requests`)
+- **`asyncpg`** or **SQLAlchemy 2.0 async** for Postgres
+- **`aio-pika`** for RabbitMQ
+- **`qdrant-client`** for the vector DB
+- **OpenAI / Anthropic official clients** for LLM and embeddings
+- **`pytest`, `pytest-asyncio`, `pytest-cov`, `httpx` (for ASGI testing)** for tests
+- **`ruff`** for linting and formatting (replaces black, flake8, isort)
+- **`mypy --strict`** for type checking — must pass in CI
+
+## Type discipline
+
+- **No untyped functions.** Every function has typed parameters and a typed return value.
+- **No `Any` in public APIs.** Internal helpers may use it sparingly with a comment justifying it.
+- **Pydantic models for all I/O boundaries:** API requests/responses, message payloads, external API contracts.
+- **`from __future__ import annotations`** at the top of every file — enables clean forward references.
+- **Use `TypedDict` or Pydantic** for dict-like structures, not bare `dict[str, Any]`.
+
+## Project structure (per service)
+
+```
+services/<service-name>/
+├── pyproject.toml
+├── Dockerfile
+├── .env.example
+├── src/
+│   └── <service_name>/
+│       ├── __init__.py
+│       ├── main.py              # FastAPI app or worker entry point
+│       ├── config.py            # Pydantic Settings
+│       ├── api/                 # FastAPI routers (RAG only)
+│       ├── core/                # Domain logic
+│       ├── adapters/            # External clients (Qdrant, LLM, DB, broker)
+│       ├── models/              # Pydantic schemas
+│       └── observability/       # Logging, tracing, metrics setup
+└── tests/
+    ├── unit/
+    ├── integration/
+    └── conftest.py
+```
+
+## Configuration
+
+- **Use `pydantic-settings` for config.** Single `Settings` class loaded from env vars.
+- **Required settings have no default.** They fail loudly at startup if missing.
+- **Settings are injected, not imported globally.** Use FastAPI's `Depends(get_settings)`.
+
+```python
+class Settings(BaseSettings):
+    """Application settings loaded from environment.
+
+    LEARNING: Required fields (no default) will raise at startup if missing.
+    Optional fields (with default) are explicit about their fallback.
+    """
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="RAG_")
+
+    postgres_dsn: str
+    qdrant_url: str
+    anthropic_api_key: SecretStr
+    embedding_model: str = "text-embedding-3-small"
+    retrieval_top_k: int = 5
+```
+
+## FastAPI conventions
+
+- **One router per resource**, mounted in `main.py`.
+- **Dependency injection for all collaborators** — never instantiate clients in route handlers.
+- **All endpoints return Pydantic models**, never bare dicts.
+- **Use `response_model`** explicitly even when return type is annotated — FastAPI uses it for OpenAPI generation.
+- **Streaming responses use `StreamingResponse`** with explicit content-type.
+- **Health check at `/health`** that verifies DB, vector DB, and external API reachability.
+- **`/metrics` endpoint** exposing Prometheus metrics.
+
+## Async discipline
+
+- **If a function does I/O, it's `async`.** No exceptions.
+- **Never call sync I/O from async code** (no `requests`, no sync DB drivers, no `time.sleep`).
+- **Use `asyncio.gather` for concurrent independent operations** — embedding multiple chunks in parallel, fetching multiple data sources concurrently.
+- **Use `asyncio.timeout` (Python 3.11+)** for operation timeouts, not custom logic.
+
+## RAG service specifics
+
+- **Retrieval and generation are separate functions**, never one combined "answer the question" function. The retriever returns chunks; the generator takes chunks + question and produces an answer. This separation is testable.
+- **Prompt assembly is a pure function** — given chunks and a question, produces a deterministic prompt string. Test it with snapshot tests.
+- **LLM calls go through a thin adapter** that handles retries (exponential backoff with `tenacity`), logging (every prompt and response in dev), and cost tracking.
+- **Cache LLM responses keyed on prompt hash during development.** Use a disk cache (`diskcache` library). Skip cache in tests and production.
+- **Citations are first-class.** Every chunk used in the answer must have its source returned alongside the answer text. Schema:
+
+```python
+class Citation(BaseModel):
+    chunk_id: str
+    movie_id: int | None
+    person_id: int | None
+    source: str  # 'tmdb_overview' | 'wiki_biography' | etc.
+    snippet: str  # first ~100 chars of chunk text
+
+class AnswerResponse(BaseModel):
+    answer: str
+    citations: list[Citation]
+    tokens_used: int
+    latency_ms: int
+```
+
+## Ingestion worker specifics
+
+- **Idempotency is mandatory.** Every operation must be safe to retry.
+  - Postgres: `INSERT ... ON CONFLICT (tmdb_id) DO UPDATE SET ...`
+  - Qdrant: `upsert` with deterministic point IDs (`f"tmdb_{movie_id}_{source}_{chunk_index}"`)
+- **Comment idempotency explicitly:** `# IDEMPOTENT: re-running with the same input produces identical state`
+- **Acknowledge messages only after successful processing.** Use manual ack mode in `aio-pika`.
+- **Failed messages go to a DLQ** after 3 retries with exponential backoff. Configure RabbitMQ for this.
+- **Each pipeline stage is its own consumer** (fetch, enrich, persist, chunk, embed, index) when ready to scale. v1 can be one big consumer; document the future split with a `# TODO(scaling):` comment.
+- **Rate limit external APIs respectfully.** TMDB allows 40 req/10s; use `aiolimiter` to stay under it.
+
+## Logging
+
+- **Structured logging with `structlog`.** No bare `print`, no plain `logging` formatters.
+- **Every log includes `correlation_id`** propagated from the message envelope or HTTP header.
+- **Log levels:**
+  - `DEBUG`: detailed flow, only enabled in dev
+  - `INFO`: significant events (request received, message processed, ingestion run started)
+  - `WARNING`: degraded conditions (retry triggered, cache miss, rate limit approached)
+  - `ERROR`: failures requiring attention
+- **Never log secrets, full tokens, or full LLM responses at INFO** (they may contain PII or be very long).
+
+## Testing
+
+- **`pytest-asyncio` with `asyncio_mode = "auto"`** in `pyproject.toml` — no need to decorate every async test.
+- **Fixtures in `conftest.py`** for: test settings, mock LLM client, mock Qdrant, real Postgres via Testcontainers (the Python equivalent: `testcontainers-python`).
+- **Snapshot tests for prompts** using `syrupy` — prompts are sensitive to whitespace and order.
+- **`pytest.mark.integration`** for tests that require Testcontainers; CI runs them in a separate stage.
+- **`httpx.ASGITransport`** for testing FastAPI without a running server.
+- **Coverage target: 80%+ on `core/` and `adapters/`.** Lower for `main.py` and config (mostly wiring).
+
+## Example: a canonical retrieval function
+
+```python
+from __future__ import annotations
+
+from typing import Final
+
+import structlog
+from qdrant_client import AsyncQdrantClient
+from qdrant_client.models import Filter
+
+from rag.adapters.embeddings import EmbeddingClient
+from rag.models.retrieval import Chunk
+
+log = structlog.get_logger(__name__)
+
+DEFAULT_TOP_K: Final = 5
+
+
+class Retriever:
+    """Retrieves relevant chunks from the vector DB.
+
+    LEARNING: This class is the boundary between "search" and "generate".
+    The retriever returns chunks; it never calls the LLM. This separation
+    lets us test retrieval quality independently of generation quality.
+    """
+
+    def __init__(
+        self,
+        qdrant: AsyncQdrantClient,
+        embedder: EmbeddingClient,
+        collection: str,
+    ) -> None:
+        self._qdrant = qdrant
+        self._embedder = embedder
+        self._collection = collection
+
+    async def retrieve(
+        self,
+        question: str,
+        *,
+        top_k: int = DEFAULT_TOP_K,
+        filter_movie_ids: list[int] | None = None,
+    ) -> list[Chunk]:
+        """Find the top-K chunks most semantically similar to the question.
+
+        Args:
+            question: The user's natural-language question.
+            top_k: How many chunks to return. Higher = more context for the LLM
+                but more tokens spent and potentially more noise.
+            filter_movie_ids: Optional restriction to chunks from these movies.
+                Used when intent classification has already narrowed the scope.
+
+        Returns:
+            Up to `top_k` chunks, ordered by cosine similarity descending.
+
+        Raises:
+            EmbeddingError: if the embedding API call fails after retries.
+            VectorSearchError: if Qdrant is unreachable.
+        """
+        # LEARNING: We embed the question with the SAME model used at ingestion.
+        # Different embedding models produce vectors in different spaces and
+        # cannot be compared. See ADR-008.
+        query_vector = await self._embedder.embed(question)
+
+        qdrant_filter = self._build_filter(filter_movie_ids)
+
+        log.debug(
+            "vector_search_starting",
+            top_k=top_k,
+            has_filter=qdrant_filter is not None,
+        )
+
+        results = await self._qdrant.search(
+            collection_name=self._collection,
+            query_vector=query_vector,
+            query_filter=qdrant_filter,
+            limit=top_k,
+        )
+
+        return [Chunk.from_qdrant_point(r) for r in results]
+
+    def _build_filter(self, movie_ids: list[int] | None) -> Filter | None:
+        # ... (concise implementation)
+        return None  # placeholder
+```
+
+## Mistakes to avoid
+
+- **Don't import LangChain or LlamaIndex unless absolutely necessary.** This project deliberately keeps the RAG loop transparent. If you need a text splitter, use `langchain-text-splitters` (a tiny standalone package) — not the full LangChain.
+- **Don't catch `Exception` broadly.** Catch specific exceptions; let unexpected ones propagate.
+- **Don't use mutable default arguments.** Always `None` then construct inside.
+- **Don't write sync wrappers around async functions** (`asyncio.run(...)`) inside library code.
+- **Don't forget to close async clients.** Use `async with` or lifespan handlers in FastAPI.

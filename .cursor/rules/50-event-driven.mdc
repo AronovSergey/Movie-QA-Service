@@ -1,0 +1,200 @@
+---
+description: "Event-driven plane: RabbitMQ messaging, idempotency, scheduled jobs"
+globs:
+  - "services/scheduler/**"
+  - "services/ingestion/**"
+  - "services/rag/**"
+  - "**/messaging/**"
+  - "**/events/**"
+---
+
+# Event-Driven Plane Rules
+
+These rules govern asynchronous communication between services via RabbitMQ. Anything published, consumed, or scheduled falls under these conventions.
+
+## The two-plane discipline
+
+This project deliberately separates the **request plane** (sync, user-facing) from the **ingestion plane** (async, background). Cross-plane communication happens through the data plane (Postgres, Qdrant) and through events on the broker.
+
+**Rules that flow from this:**
+
+- The ingestion service must NEVER expose public HTTP endpoints. It is a worker, not a service.
+- The scheduler must NEVER do business logic. It only publishes events.
+- The chat/auth/catalog services must NEVER consume from the ingestion plane's queues.
+- The ingestion workers must NEVER write to user-owned tables (users, conversations, messages).
+
+When in doubt: would a failure here block a user request? If yes, it belongs in the request plane. If no, it belongs in the ingestion plane.
+
+## Topic and queue naming
+
+Use dot-separated, lowercase names:
+
+| Pattern | Use for | Examples |
+|---|---|---|
+| `<noun>.<past-tense-verb>` | Domain events (something happened) | `movie.indexed`, `answer.ready`, `question.asked` |
+| `<noun>.<imperative-verb>` | Commands (please do X) | `ingest.requested`, `embed.requested` |
+| `*.dlq` | Dead-letter queues | `ingest.requested.dlq` |
+| `*.retry` | Retry queues with delay | `ingest.requested.retry` |
+
+Each event/command has a documented schema in `services/<service>/src/.../events/`.
+
+## Event schemas
+
+- **All events are JSON with a Pydantic (Python) or Java record (Java) schema.**
+- **Every event includes:**
+  - `event_id`: UUID, unique per publish
+  - `event_type`: string, the topic/queue name
+  - `event_version`: integer, starts at 1, increments on breaking changes
+  - `correlation_id`: UUID, propagated from the originating request
+  - `timestamp`: ISO 8601 UTC
+  - `payload`: the event-specific body
+
+```python
+class IngestRequestedEvent(BaseModel):
+    """Published by the scheduler when ingestion should run.
+
+    LEARNING: Events are JSON-serializable, immutable records of "something
+    happened" or "please do something". They include a correlation_id so
+    we can trace a logical operation across multiple services.
+    """
+    event_id: UUID
+    event_type: Literal["ingest.requested"]
+    event_version: int = 1
+    correlation_id: UUID
+    timestamp: datetime
+    payload: IngestRequestedPayload
+
+
+class IngestRequestedPayload(BaseModel):
+    job_id: UUID
+    source: Literal["tmdb", "wikipedia"]
+    mode: Literal["full", "incremental"]
+    since: datetime | None = None  # for incremental mode
+    limit: int | None = None  # for testing
+```
+
+## Idempotency (mandatory, no exceptions)
+
+**Every consumer must be idempotent.** Messages CAN be delivered more than once. Your consumer must produce the same final state whether the message is processed once, twice, or ten times.
+
+### Patterns to use
+
+- **Postgres upserts:** `INSERT ... ON CONFLICT (natural_key) DO UPDATE SET ...`
+- **Qdrant upserts** with deterministic point IDs derived from the source data
+- **Idempotency key tracking** for non-upsert operations: store `(operation, key)` pairs in a `processed_events` table; check before doing the work
+
+```python
+# IDEMPOTENT: Re-processing this event produces identical Postgres + Qdrant state.
+# - Postgres: upsert keyed on tmdb_id
+# - Qdrant: upserts with deterministic point IDs `tmdb_{movie_id}_{source}_{idx}`
+async def handle_ingest_movie(event: IngestMovieEvent) -> None:
+    movie = await tmdb_client.fetch_movie(event.payload.tmdb_id)
+    await catalog_repo.upsert(movie)
+    chunks = chunker.chunk_movie(movie)
+    embeddings = await embedder.embed_many([c.text for c in chunks])
+    points = [
+        PointStruct(
+            id=f"tmdb_{movie.id}_{c.source}_{c.index}",  # deterministic
+            vector=emb,
+            payload=c.metadata,
+        )
+        for c, emb in zip(chunks, embeddings, strict=True)
+    ]
+    await qdrant.upsert(collection_name=COLLECTION, points=points)
+```
+
+### Anti-patterns
+
+- **Auto-incrementing IDs as the primary key for upserted entities.** Use a natural key from the source.
+- **`INSERT` without `ON CONFLICT`** in any consumer. This will explode on retry.
+- **Counting/incrementing without an idempotency check.** "Increment the counter" is not idempotent. Use "set counter to N where the source had N events."
+
+## Acknowledgment
+
+- **Use manual acknowledgment mode** in all consumers. Don't auto-ack.
+- **Ack only after successful processing.** If the work succeeds, ack. If it fails, nack and let it retry.
+- **Use `requeue=False` on nack** when the failure is permanent (bad data, validation error). The message goes to DLQ.
+- **Use `requeue=True` (or retry queue with delay) on nack** when the failure is transient (network blip, downstream rate limit).
+
+## Retries and DLQs
+
+Configure RabbitMQ for proper retry handling:
+
+- **Retry queue with TTL + dead-letter exchange routing back to the main queue.** Failed messages wait, then return.
+- **Maximum retry count tracked in headers.** After N retries (default 3), route to the DLQ.
+- **DLQ has alerting** in production. A non-empty DLQ in dev is fine; in prod, page someone.
+- **Document each consumer's retry policy** in a comment near the handler:
+
+```python
+# RETRY POLICY:
+# - Transient failures (TMDB 5xx, network): exponential backoff up to 3 attempts
+# - Permanent failures (TMDB 404, validation): straight to DLQ
+# - DLQ inspected manually; reprocess with `python -m ingestion replay-dlq`
+```
+
+## Scheduler discipline
+
+The scheduler is intentionally tiny. It does ONE thing: publish events on a schedule.
+
+- **Use Spring's `@Scheduled` for cron-based triggers.**
+- **Document each cron expression with a `// LEARNING:` comment** explaining the schedule in plain English.
+- **Use UTC for all schedules.** Document the timezone assumption.
+- **If multiple scheduler instances might run, use a distributed lock.** ShedLock with Postgres or Redis is the standard.
+- **Expose admin endpoints behind separate admin auth** (not user JWT). These are for manual triggering during development or operations.
+
+```java
+// LEARNING: This cron runs every 8 hours: at 00:00, 08:00, and 16:00 UTC.
+// We use cron syntax: second(0) minute(0) hour(every 8) day(*) month(*) weekday(*).
+// See ADR-014 for why we picked 8h instead of nightly.
+@Scheduled(cron = "0 0 */8 * * *", zone = "UTC")
+public void triggerIncrementalIngestion() {
+    var event = IngestRequestedEvent.incremental(
+        UUID.randomUUID(),
+        Instant.now(),
+        Source.TMDB
+    );
+    eventPublisher.publish("ingest.requested", event);
+    log.info("scheduled_ingestion_triggered", kv("event_id", event.id()));
+}
+```
+
+## Tracing across the broker
+
+- **Propagate `correlation_id` in every event.** Loggers across services include it in MDC/structlog context.
+- **Use OpenTelemetry's messaging conventions** to create span links between publish and consume operations.
+- **Log every publish and every consume at INFO** with `event_id`, `event_type`, `correlation_id`.
+
+## Testing event-driven code
+
+- **Unit tests** for handlers: construct an event, call the handler with mocked collaborators, assert side effects.
+- **Integration tests** with **Testcontainers RabbitMQ**: real broker, publish a real event, assert the consumer processes it.
+- **Idempotency tests** are MANDATORY for every consumer:
+
+```python
+async def test_handler_is_idempotent(test_consumer, sample_event):
+    """Processing the same event twice produces identical state."""
+    await test_consumer.handle(sample_event)
+    state_after_first = await snapshot_state()
+
+    await test_consumer.handle(sample_event)  # again
+    state_after_second = await snapshot_state()
+
+    assert state_after_first == state_after_second
+```
+
+- **Failure tests:** simulate downstream failures, assert messages route to DLQ after retries.
+
+## Monitoring
+
+- **Queue depth** is the key metric. Steadily growing depth means consumers can't keep up.
+- **DLQ depth** is the alert. Should be zero in healthy operation.
+- **Consumer lag** (oldest unconsumed message age) — alert if it exceeds the SLO.
+- **Publish rate vs consume rate** as a Grafana panel.
+
+## Common mistakes
+
+- **Mistake: business logic in the publisher.** "Build the message body, then enrich with X, then publish." Move the enrichment to the consumer; publishers should be tiny.
+- **Mistake: assuming exactly-once delivery.** RabbitMQ is at-least-once. Idempotency is the consumer's responsibility.
+- **Mistake: forgetting to declare queues with proper arguments** (DLX, TTL, max-length). Use a startup script or a config class that declares all queues identically across services.
+- **Mistake: using the broker for sync request/response.** RabbitMQ supports RPC patterns but it's almost always wrong. Use HTTP for sync.
+- **Mistake: events as commands and vice versa.** An event is "something happened, multiple consumers may care." A command is "please do X, exactly one consumer should handle." Confusing them leads to weird coupling.
