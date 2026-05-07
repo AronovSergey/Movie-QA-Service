@@ -28,6 +28,13 @@ on:
 # LEARNING: `concurrency` with `cancel-in-progress: true` is a small but
 # important quality-of-life setting — without it, every push queues a new run
 # even if the previous one hasn't finished yet.
+# Opt into Node.js 24 for the GitHub Actions runner now, ahead of the forced
+# migration on June 2nd 2026. Without this, actions compiled against Node.js 20
+# (checkout, setup-java, setup-node, setup-uv) produce deprecation warnings.
+# This env var is safe to remove once Node.js 24 becomes the default.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
