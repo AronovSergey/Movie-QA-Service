@@ -34,6 +34,7 @@ on:
 # This env var is safe to remove once Node.js 24 becomes the default.
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
 
 concurrency:
   group: ci-${{ github.ref }}
