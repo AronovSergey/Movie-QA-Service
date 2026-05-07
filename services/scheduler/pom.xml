@@ -118,6 +118,28 @@
 					</execution>
 				</executions>
 			</plugin>
+		<!-- Spotless: enforces consistent Java formatting via Google Java Format.
+			 Run `./mvnw spotless:apply` to auto-format. Run `./mvnw spotless:check`
+			 to verify (used in CI). Pre-commit hooks call spotless:apply automatically.
+			 LEARNING: We use AOSP style (4-space indent) rather than the default
+			 Google style (2-space) because Spring Boot projects conventionally use
+			 4-space indentation. -->
+			<plugin>
+				<groupId>com.diffplug.spotless</groupId>
+				<artifactId>spotless-maven-plugin</artifactId>
+				<version>2.43.0</version>
+				<configuration>
+					<java>
+						<googleJavaFormat>
+							<version>1.23.0</version>
+							<style>AOSP</style>
+						</googleJavaFormat>
+						<removeUnusedImports/>
+						<trimTrailingWhitespace/>
+						<endWithNewline/>
+					</java>
+				</configuration>
+			</plugin>
 		</plugins>
 	</build>
 

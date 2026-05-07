@@ -1,0 +1,110 @@
+# .pre-commit-config.yaml — pre-commit hook configuration
+#
+# Runs automatically on `git commit` after `pre-commit install`.
+# Can also be run manually: `pre-commit run --all-files`
+#
+# LEARNING: Pre-commit hooks catch formatting and lint issues *before* they
+# reach CI, which gives much faster feedback (seconds vs minutes). The hooks
+# here are all "auto-fix" style — they reformat the changed files in place.
+# If a hook changes a file, the commit is aborted so you can review the diff
+# and re-stage. Just run `git add .` and commit again.
+#
+# Setup (one time per machine):
+#   pip install pre-commit     # or: brew install pre-commit
+#   pre-commit install         # installs the git hook
+#
+# To run against all files (e.g. on first install or after config changes):
+#   pre-commit run --all-files
+
+# ── Schema version ────────────────────────────────────────────────────────────
+default_language_version:
+  python: python3.12
+
+repos:
+
+  # ── General file hygiene ───────────────────────────────────────────────────
+  # LEARNING: These tiny hooks catch the most common commit-time annoyances:
+  # trailing whitespace that creates noisy diffs, missing newlines at EOF
+  # that some tools complain about, and accidentally committed merge conflict
+  # markers or huge binary files.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: '\.md$'   # markdown uses trailing spaces for line breaks
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ['--maxkb=500']
+
+  # ── Python — ruff (lint + format) ─────────────────────────────────────────
+  # LEARNING: ruff-pre-commit runs ruff in an isolated environment managed by
+  # pre-commit — it doesn't use the venv in services/rag/. The version must
+  # match the one pinned in services/rag/pyproject.toml to avoid behaviour
+  # differences between local runs and the hook.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.9.10
+    hooks:
+      # Lint: fix auto-fixable issues (unused imports, style violations)
+      - id: ruff
+        files: ^services/rag/
+        args: [--fix]
+      # Format: black-compatible formatter (replaces black)
+      - id: ruff-format
+        files: ^services/rag/
+
+  # ── TypeScript / CSS / JSON — Prettier ────────────────────────────────────
+  # LEARNING: mirrors-prettier runs Prettier in a pre-commit-managed env.
+  # Config is read from frontend/.prettierrc (Prettier searches upward from
+  # each file, so files inside frontend/src/ pick up frontend/.prettierrc).
+  - repo: https://github.com/pre-commit/mirrors-prettier
+    rev: v3.1.0
+    hooks:
+      - id: prettier
+        files: ^frontend/src/
+        types_or: [ts, tsx, javascript, css, json]
+        additional_dependencies:
+          # Pin to the same major version as in frontend/package.json
+          - prettier@3
+
+  # ── Java — Spotless (Google Java Format, AOSP style) ──────────────────────
+  # LEARNING: Spotless is a Maven plugin, so we run it as a local hook via
+  # the Maven wrapper. Each service has its own hook so failures are clearly
+  # attributed to the right service.
+  #
+  # `spotless:apply` reformats files in place. The hook exits non-zero after
+  # reformatting (because files changed), which aborts the commit. Stage the
+  # reformatted files with `git add .` and commit again — it will pass.
+  #
+  # `pass_filenames: false` is required because Spotless discovers files
+  # itself via its Maven config, not from the argument list.
+  - repo: local
+    hooks:
+      - id: spotless-auth
+        name: Spotless — auth
+        language: system
+        entry: bash -c 'cd services/auth && ./mvnw -q spotless:apply'
+        files: ^services/auth/.*\.java$
+        pass_filenames: false
+
+      - id: spotless-chat
+        name: Spotless — chat
+        language: system
+        entry: bash -c 'cd services/chat && ./mvnw -q spotless:apply'
+        files: ^services/chat/.*\.java$
+        pass_filenames: false
+
+      - id: spotless-catalog
+        name: Spotless — catalog
+        language: system
+        entry: bash -c 'cd services/catalog && ./mvnw -q spotless:apply'
+        files: ^services/catalog/.*\.java$
+        pass_filenames: false
+
+      - id: spotless-scheduler
+        name: Spotless — scheduler
+        language: system
+        entry: bash -c 'cd services/scheduler && ./mvnw -q spotless:apply'
+        files: ^services/scheduler/.*\.java$
+        pass_filenames: false

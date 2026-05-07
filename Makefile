@@ -23,7 +23,8 @@ SHELL       := bash
 .PHONY: help \
         infra-up infra-down up down logs \
         test test-java test-rag test-frontend \
-        lint lint-rag lint-frontend \
+        lint lint-rag lint-frontend lint-java \
+        format format-rag format-frontend format-java \
         clean
 
 # Spring Boot services that have a Maven wrapper
@@ -85,13 +86,35 @@ test-frontend: ## Run frontend tests (Vitest)
 
 # ── Lint ──────────────────────────────────────────────────────────────────────
 
-lint: lint-rag lint-frontend ## Run all linters
+lint: lint-rag lint-frontend lint-java ## Run all linters
 
 lint-rag: ## Lint RAG service with ruff
 	cd services/rag && uv run ruff check src/ tests/
 
 lint-frontend: ## Lint frontend with ESLint + TypeScript typecheck
 	cd frontend && npm run lint && npm run typecheck
+
+lint-java: ## Check Java formatting with Spotless (all services)
+	@for svc in $(JAVA_SERVICES); do \
+	  echo "── Spotless check: services/$$svc ──────────────────"; \
+	  cd services/$$svc && ./mvnw -q spotless:check && cd ../..; \
+	done
+	@echo "✓ Java formatting OK"
+
+format: format-rag format-frontend format-java ## Auto-format all code
+
+format-rag: ## Format RAG service with ruff
+	cd services/rag && uv run ruff format src/ tests/
+
+format-frontend: ## Format frontend with Prettier
+	cd frontend && npm run format
+
+format-java: ## Auto-format Java with Spotless (all services)
+	@for svc in $(JAVA_SERVICES); do \
+	  echo "── Spotless apply: services/$$svc ──────────────────"; \
+	  cd services/$$svc && ./mvnw -q spotless:apply && cd ../..; \
+	done
+	@echo "✓ Java formatting applied"
 
 # ── Cleanup ───────────────────────────────────────────────────────────────────
 
