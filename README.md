@@ -156,6 +156,7 @@ Every operation is idempotent — safe to re-run on the same input.
 | Node.js | 20+ | `nvm install 20` |
 | Python | 3.12 | `uv python install 3.12` |
 | uv | latest | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
+| pre-commit | latest | `uv tool install pre-commit` |
 
 ### First-time setup
 
@@ -164,10 +165,49 @@ Every operation is idempotent — safe to re-run on the same input.
 cp .env.example .env
 
 # 2. Start the data plane (Postgres, Redis, Qdrant, RabbitMQ, Nginx)
-docker compose --profile infra up -d
+make infra-up
 
-# 3. Verify all services are healthy
-docker compose ps
+# 3. Install frontend dependencies
+cd frontend && npm install && cd ..
+
+# 4. Install RAG service dependencies
+cd services/rag && uv sync --dev && cd ../..
+
+# 5. Install pre-commit hooks (runs automatically on every git commit)
+pre-commit install
+```
+
+### Daily workflow
+
+```bash
+make infra-up     # start Postgres, Redis, Qdrant, RabbitMQ
+make test         # run all test suites (Java + RAG + frontend)
+make lint         # run all linters
+make format       # auto-fix formatting across all services
+make logs         # tail container logs
+make infra-down   # stop infra when done
+```
+
+### Pre-commit hooks
+
+Hooks run automatically on every `git commit` and enforce formatting before code reaches CI:
+
+| Hook | What it checks |
+|---|---|
+| `trailing-whitespace` | No trailing spaces |
+| `end-of-file-fixer` | Files end with a newline |
+| `check-yaml` | Valid YAML syntax |
+| `ruff` | Python lint + auto-fix (RAG service) |
+| `ruff-format` | Python formatting (RAG service) |
+| `prettier` | TypeScript / CSS / JSON formatting (frontend) |
+| `spotless-*` | Java formatting via Google Java Format, AOSP style |
+
+If a hook auto-fixes files, the commit is aborted so you can review the diff. Stage with `git add .` and commit again — it will pass.
+
+To run all hooks manually without committing:
+
+```bash
+pre-commit run --all-files
 ```
 
 ---
@@ -205,7 +245,7 @@ See [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md) for the full phased pla
 
 | Phase | Goal | Status |
 |---|---|---|
-| 0 | Project skeleton — repo, infra, service scaffolds | 🔄 In progress |
+| 0 | Project skeleton — repo, infra, service scaffolds | ✅ Done |
 | 1 | RAG works in a Jupyter notebook | ⬜ Pending |
 | 2 | RAG wrapped in a FastAPI service | ⬜ Pending |
 | 3 | Chat service with Postgres persistence | ⬜ Pending |
