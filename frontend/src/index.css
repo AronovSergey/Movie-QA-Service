@@ -9,7 +9,7 @@
  * Compare this to Tailwind v3, which required a config file, a PostCSS setup,
  * and @tailwind base/components/utilities directives. v4 is simpler.
  */
-@import "tailwindcss";
+@import 'tailwindcss';
 
 /*
  * Design tokens — extend Tailwind's palette with project-specific values.
